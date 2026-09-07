@@ -30,6 +30,7 @@
 #define USART2_BASE               (APB1PERIPH_BASE + 0x4400UL)
 #define TIM3_BASE                  (APB1PERIPH_BASE + 0x0400UL)
 #define SPI1_BASE                   (APB2PERIPH_BASE + 0x3000UL)
+#define NVIC_BASE                    0xE000E100UL
 
 /* ---------------- RCC ---------------- */
 typedef struct {
@@ -152,8 +153,15 @@ typedef struct {
 #define I2C_SR1_SB          (1UL << 0)
 #define I2C_SR1_ADDR        (1UL << 1)
 #define I2C_SR1_BTF         (1UL << 2)
-#define I2C_SR1_RXNE        (1UL << 6)
-#define I2C_SR1_TXE         (1UL << 7)
+#define I2C_SR1_RXNE          (1UL << 6)
+#define I2C_SR1_TXE           (1UL << 7)
+#define I2C_SR1_BERR          (1UL << 8)
+#define I2C_SR1_ARLO          (1UL << 9)
+#define I2C_SR1_AF            (1UL << 10)
+#define I2C_SR1_OVR           (1UL << 11)
+#define I2C_CR2_ITERREN       (1UL << 8)
+#define I2C_CR2_ITEVFEN       (1UL << 10)
+#define I2C_CR2_ITBUFEN       (1UL << 9)
 
 /* ---------------- USART2 ---------------- */
 typedef struct {
@@ -173,6 +181,7 @@ typedef struct {
 #define USART_SR_RXNE        (1UL << 5)
 #define USART_CR1_RE         (1UL << 2)
 #define USART_CR1_TE         (1UL << 3)
+#define USART_CR1_RXNEIE     (1UL << 5)
 #define USART_CR1_UE         (1UL << 13)
 
 /* ---------------- TIM3 (general-purpose timer, used for PWM here) ---------------- */
@@ -235,6 +244,20 @@ typedef struct {
 #define SPI_SR_RXNE          (1UL << 0)
 #define SPI_SR_TXE           (1UL << 1)
 #define SPI_SR_BSY           (1UL << 7)
+
+/* ---------------- NVIC (ARM Cortex-M core peripheral) ---------------- */
+typedef struct {
+    volatile uint32_t ISER[8]; /* Interrupt Set-Enable Registers, one bit per IRQ */
+    uint32_t RESERVED0[24];
+    volatile uint32_t ICER[8]; /* Interrupt Clear-Enable Registers */
+} NVIC_TypeDef;
+
+#define NVIC    ((NVIC_TypeDef *) NVIC_BASE)
+
+/* IRQ numbers used in this project (from the STM32F407 vector table, IRQ0-based) */
+#define I2C1_EV_IRQn    31
+#define I2C1_ER_IRQn    32
+#define USART2_IRQn     38
 
 /* ---------------- SysTick (ARM Cortex-M core peripheral) ---------------- */
 typedef struct {

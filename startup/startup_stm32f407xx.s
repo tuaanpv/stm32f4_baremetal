@@ -67,10 +67,11 @@ Infinite_Loop:
     .size Default_Handler, .-Default_Handler
 
 /**
- * Minimal vector table.
- * Only the entries needed here (SP, Reset, NMI, HardFault) are set explicitly;
- * the rest point at Default_Handler so an unexpected IRQ just loops instead of
- * jumping into garbage memory.
+ * Vector table. SP/Reset/NMI/HardFault/... core exceptions are set explicitly.
+ * External IRQs (IRQ0..IRQ81) point at Default_Handler by default so an
+ * unexpected interrupt just loops instead of jumping into garbage memory --
+ * except I2C1_EV (31), I2C1_ER (32) and USART2 (38), which have named,
+ * weakly-aliased handlers so uart.c/i2c.c can override them with real ISRs.
  */
     .section .isr_vector,"a",%progbits
     .type g_pfnVectors, %object
@@ -93,8 +94,21 @@ g_pfnVectors:
     .word 0
     .word PendSV_Handler
     .word SysTick_Handler
-    /* External interrupts (IRQ0..IRQ81) - all default for this example */
-    .space (82 * 4), 0
+    /* IRQ0..IRQ30 (31 entries): not used in this project */
+    .rept 31
+    .word Default_Handler
+    .endr
+    .word I2C1_EV_IRQHandler   /* IRQ31 */
+    .word I2C1_ER_IRQHandler   /* IRQ32 */
+    /* IRQ33..IRQ37 (5 entries: I2C2_EV, I2C2_ER, SPI1, SPI2, USART1): not used */
+    .rept 5
+    .word Default_Handler
+    .endr
+    .word USART2_IRQHandler    /* IRQ38 */
+    /* IRQ39..IRQ81 (43 entries): not used in this project */
+    .rept 43
+    .word Default_Handler
+    .endr
 
     .weak NMI_Handler
     .thumb_set NMI_Handler,Default_Handler
@@ -114,3 +128,10 @@ g_pfnVectors:
     .thumb_set PendSV_Handler,Default_Handler
     .weak SysTick_Handler
     .thumb_set SysTick_Handler,Default_Handler
+    .weak I2C1_EV_IRQHandler
+    .thumb_set I2C1_EV_IRQHandler,Default_Handler
+    .weak I2C1_ER_IRQHandler
+    .thumb_set I2C1_ER_IRQHandler,Default_Handler
+    .weak USART2_IRQHandler
+    .thumb_set USART2_IRQHandler,Default_Handler
+

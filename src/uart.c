@@ -1,4 +1,11 @@
 #include "uart.h"
+#include "nvic.h"
+
+/* ---- Interrupt-driven RX ring buffer ---- */
+#define UART_RX_BUF_SIZE 64 /* must be a power of two */
+static volatile uint8_t  s_rx_buf[UART_RX_BUF_SIZE];
+static volatile uint16_t s_rx_head = 0; /* next slot the ISR will write */
+static volatile uint16_t s_rx_tail = 0; /* next slot the application will read */
 
 void uart2_init(uint32_t pclk_hz, uint32_t baud)
 {
@@ -78,4 +85,33 @@ uint8_t uart2_read_byte(void)
     while ((USART2->SR & USART_SR_RXNE) == 0) { /* wait until a byte has arrived */
     }
     return (uint8_t)USART2->DR;
+}
+
+void uart2_it_init(uint32_t pclk_hz, uint32_t baud)
+{
+    uart2_init(pclk_hz, baud); /* reuse the existing pin/baud setup */
+    USART2->CR1 |= USART_CR1_RXNEIE;
+    nvic_enable_irq(USART2_IRQn);
+}
+
+void USART2_IRQHandler(void)
+{
+    if (USART2->SR & USART_SR_RXNE) {
+        uint8_t byte = (uint8_t)USART2->DR; /* reading DR also clears RXNE */
+        uint16_t next = (uint16_t)((s_rx_head + 1) & (UART_RX_BUF_SIZE - 1));
+        if (next != s_rx_tail) {
+            s_rx_buf[s_rx_head] = byte;
+            s_rx_head = next;
+        } /* else: buffer full, incoming byte is dropped rather than overwriting unread data */
+    }
+}
+
+int uart2_it_read_byte(uint8_t *out)
+{
+    if (s_rx_head == s_rx_tail) {
+        return 0; /* buffer empty */
+    }
+    *out = s_rx_buf[s_rx_tail];
+    s_rx_tail = (uint16_t)((s_rx_tail + 1) & (UART_RX_BUF_SIZE - 1));
+    return 1;
 }

@@ -1,4 +1,5 @@
 #include "i2c.h"
+#include "nvic.h"
 
 #define I2C_TIMEOUT 100000UL
 
@@ -105,4 +106,141 @@ int i2c1_read(uint8_t dev_addr, uint8_t reg, uint8_t *data, uint16_t len)
     }
     if (len == 1) i2c1_stop();
     return 0;
+}
+
+/* ---- Interrupt-driven read ----
+   Same protocol as the blocking i2c1_read() above (CMD sequence: START,
+   write reg, repeated START, read N bytes, NACK+STOP before the last byte),
+   just split across ISR calls instead of a single blocking function, driven
+   by the SB/ADDR/BTF/RXNE events named in RM0090's I2C event descriptions
+   (EV5, EV6, EV8_2, EV7). */
+
+typedef enum {
+    PHASE_NONE = 0,
+    PHASE_START1,   /* waiting for SB after the first START (write direction) */
+    PHASE_ADDR1,    /* waiting for ADDR after sending the device address (write) */
+    PHASE_REG_SENT, /* waiting for BTF after sending the register byte */
+    PHASE_START2,   /* waiting for SB after the repeated START (read direction) */
+    PHASE_ADDR2,    /* waiting for ADDR after sending the device address (read) */
+    PHASE_RECEIVING,
+} i2c_it_phase_t;
+
+static volatile i2c_it_status_t s_it_status = I2C_IT_IDLE;
+static volatile i2c_it_phase_t  s_it_phase  = PHASE_NONE;
+static uint8_t   s_it_dev_addr;
+static uint8_t   s_it_reg;
+static uint8_t  *s_it_buf;
+static uint16_t  s_it_len;
+static uint16_t  s_it_index;
+
+void i2c1_it_init(void)
+{
+    i2c1_init(); /* reuse the pin mux, clock and CCR/TRISE setup from the polling driver */
+    I2C1->CR2 |= I2C_CR2_ITEVFEN | I2C_CR2_ITBUFEN | I2C_CR2_ITERREN;
+    nvic_enable_irq(I2C1_EV_IRQn);
+    nvic_enable_irq(I2C1_ER_IRQn);
+}
+
+i2c_it_status_t i2c1_it_get_status(void)
+{
+    return s_it_status;
+}
+
+i2c_it_status_t i2c1_it_read(uint8_t dev_addr, uint8_t reg, uint8_t *buf, uint16_t len)
+{
+    if (s_it_status == I2C_IT_BUSY) {
+        return I2C_IT_ERROR; /* a transaction is already in flight, refuse to start another */
+    }
+
+    s_it_dev_addr = dev_addr;
+    s_it_reg      = reg;
+    s_it_buf      = buf;
+    s_it_len      = len;
+    s_it_index    = 0;
+    s_it_phase    = PHASE_START1;
+    s_it_status   = I2C_IT_BUSY;
+
+    I2C1->CR1 |= I2C_CR1_ACK;
+    I2C1->CR1 |= I2C_CR1_START; /* triggers the SB event -> I2C1_EV_IRQHandler */
+    return I2C_IT_BUSY;
+}
+
+void I2C1_EV_IRQHandler(void)
+{
+    uint32_t sr1 = I2C1->SR1;
+
+    switch (s_it_phase) {
+    case PHASE_START1:
+        if (sr1 & I2C_SR1_SB) {
+            I2C1->DR = (uint8_t)(s_it_dev_addr << 1); /* address + write bit */
+            s_it_phase = PHASE_ADDR1;
+        }
+        break;
+
+    case PHASE_ADDR1:
+        if (sr1 & I2C_SR1_ADDR) {
+            (void)I2C1->SR1;
+            (void)I2C1->SR2; /* clear ADDR by reading SR1 then SR2 */
+            I2C1->DR = s_it_reg; /* send the register address */
+            s_it_phase = PHASE_REG_SENT;
+        }
+        break;
+
+    case PHASE_REG_SENT:
+        if (sr1 & I2C_SR1_BTF) {
+            I2C1->CR1 |= I2C_CR1_START; /* repeated START, triggers SB again */
+            s_it_phase = PHASE_START2;
+        }
+        break;
+
+    case PHASE_START2:
+        if (sr1 & I2C_SR1_SB) {
+            if (s_it_len == 1) {
+                I2C1->CR1 &= ~I2C_CR1_ACK; /* NACK the only byte, per RM0090's single-byte read sequence */
+            }
+            I2C1->DR = (uint8_t)((s_it_dev_addr << 1) | 1); /* address + read bit */
+            s_it_phase = PHASE_ADDR2;
+        }
+        break;
+
+    case PHASE_ADDR2:
+        if (sr1 & I2C_SR1_ADDR) {
+            (void)I2C1->SR1;
+            (void)I2C1->SR2; /* clear ADDR */
+            if (s_it_len == 1) {
+                I2C1->CR1 |= I2C_CR1_STOP; /* STOP right after clearing ADDR, single-byte case */
+            }
+            s_it_phase = PHASE_RECEIVING;
+        }
+        break;
+
+    case PHASE_RECEIVING:
+        if (sr1 & I2C_SR1_RXNE) {
+            if (s_it_len >= 2 && s_it_index == s_it_len - 2) {
+                I2C1->CR1 &= ~I2C_CR1_ACK; /* NACK the last byte */
+                I2C1->CR1 |= I2C_CR1_STOP; /* STOP before reading the second-to-last byte */
+            }
+            s_it_buf[s_it_index++] = (uint8_t)I2C1->DR;
+            if (s_it_index >= s_it_len) {
+                s_it_phase  = PHASE_NONE;
+                s_it_status = I2C_IT_DONE;
+            }
+        }
+        break;
+
+    default:
+        break; /* stray event with no transaction in flight; nothing to do */
+    }
+}
+
+void I2C1_ER_IRQHandler(void)
+{
+    uint32_t sr1 = I2C1->SR1;
+
+    if (sr1 & (I2C_SR1_AF | I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_OVR)) {
+        I2C1->SR1 &= ~(I2C_SR1_AF | I2C_SR1_BERR | I2C_SR1_ARLO | I2C_SR1_OVR); /* clear error flags */
+        I2C1->CR1 |= I2C_CR1_STOP;
+        s_it_phase  = PHASE_NONE;
+        s_it_status = I2C_IT_ERROR;
+    }
 }
